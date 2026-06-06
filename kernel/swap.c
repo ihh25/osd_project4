@@ -29,8 +29,9 @@
 #include "sleeplock.h"
 #include "riscv.h"
 #include "defs.h"
-#include "fs.h"   // BSIZE
-#include "buf.h"  // struct buf (data field accessed directly)
+#include "fs.h"  // BSIZE
+#include "buf.h" // struct buf (data field accessed directly)
+#include "proc.h"
 
 #define BLKS_PER_PAGE (PGSIZE / BSIZE)       // 4
 #define NSWAPSLOTS (SWAPMAX / BLKS_PER_PAGE) // total page-sized slots
@@ -208,53 +209,50 @@ void swapstat(int *nr_sectors_read, int *nr_sectors_write)
 //                             failure to put the page back where it was)
 //
 // AI was used (Claude) to assist with this implementation
-void *
-swap_out(void)
+void *swap_out(void)
 {
   pagetable_t pt;
   uint64 va;
   uint64 pa;
   pte_t *pte;
+  pte_t old_pte;
   int slot;
 
   // 1. Victim 선택 (LRU에서 자동 unlink됨)
   pa = lru_select_victim(&pt, &va);
   if (pa == 0)
-    return 0; // LRU 비어있음
+    return 0;
+
 
   // 2. 빈 swap slot 확보
   slot = swap_alloc_slot();
   if (slot < 0)
   {
-    // swap 영역 꽉 참 → victim을 LRU에 복귀시키고 실패
     lru_add(pt, va, pa);
     return 0;
   }
 
-  // 3. Victim 페이지 내용을 디스크에 기록
-  swapwrite(pa, slot);
-
-  // 4. Victim의 PTE 갱신
+  // 3. PTE를 swapwrite 전에 미리 읽어둠 (race 방지)
   pte = walk(pt, va, 0);
   if (pte == 0)
   {
-    // 방어: walk 실패 시 슬롯 회수하고 실패
     swap_free_slot(slot);
     lru_add(pt, va, pa);
     return 0;
   }
+  old_pte = *pte;
 
-  // 기존 perm 비트 (PTE_U/R/W/X) 유지하면서 PPN을 slot으로, V→0, S→1
-  uint64 flags = PTE_FLAGS(*pte) & (PTE_U | PTE_R | PTE_W | PTE_X);
+  // 4. Victim 페이지 내용을 디스크에 기록 (sleep 가능)
+  swapwrite(pa, slot);
+
+  // 5. PTE 갱신: 저장해둔 old_pte의 flags 사용
+  uint64 flags = PTE_FLAGS(old_pte) & (PTE_U | PTE_R | PTE_W | PTE_X);
   *pte = SLOT2PTE(slot) | flags | PTE_S;
-  // PTE_V는 위에서 마스킹해서 빠짐, PTE_S는 OR로 set
-
   sfence_vma();
 
-  // 5. 비워진 프레임을 호출자에게 반환 (kalloc이 새 용도로 사용)
+  // 6. 비워진 프레임을 호출자에게 반환
   return (void *)pa;
 }
-
 //
 // swap_in:
 //   Bring a swapped-out page back into memory.  Called from the page-fault
@@ -299,6 +297,7 @@ swap_out(void)
 int swap_in(pagetable_t pt, uint64 va)
 {
   pte_t *pte;
+  pte_t old_pte;
   uint slot;
   char *mem;
 
@@ -312,25 +311,37 @@ int swap_in(pagetable_t pt, uint64 va)
   if ((*pte & PTE_V) || !(*pte & PTE_S))
     return -1; // swap된 페이지 아님 → 진짜 segfault
 
-  // 3. Slot 번호 추출
-  slot = PTE2SLOT(*pte);
+
+  // 3. PTE 값을 미리 저장 (kalloc 중 race 방지)
+  old_pte = *pte;
+  slot = PTE2SLOT(old_pte);
 
   // 4. 새 물리 프레임 할당
-  // (이 kalloc이 swap_out을 재귀적으로 부를 수 있음 — 정상)
   mem = kalloc();
   if (mem == 0)
-    return -1; // RAM+swap 둘 다 꽉 참
+    return -1;
 
-  // 5. 디스크에서 슬롯 내용 복사 + 슬롯 해제
+  // 5. 디스크에서 슬롯 내용 복사
   swapread((uint64)mem, slot);
+
+  // PA4: swapread 후 PTE 재확인 (sleep 중 변경 가능성)
+  // AI was used (Claude) to add post-sleep PTE validation
+  pte = walk(pt, va, 0);
+  if (pte == 0 || (*pte & PTE_V) || !(*pte & PTE_S))
+  {
+    // PTE가 변했음 - 새 프레임 반환하고 실패
+    kfree(mem);
+    // swap slot은 여기서 해제하면 안 됨 (다른 코드가 쓸 수 있음)
+    return -1;
+  }
+
   swap_free_slot(slot);
 
-  // 6. PTE 갱신: 새 프레임 주소 + PTE_V=1, PTE_S=0
-  uint64 flags = PTE_FLAGS(*pte) & (PTE_U | PTE_R | PTE_W | PTE_X);
+  // 6. PTE 갱신
+  uint64 flags = PTE_FLAGS(old_pte) & (PTE_U | PTE_R | PTE_W | PTE_X);
   *pte = PA2PTE((uint64)mem) | flags | PTE_V;
-  // PTE_S 빠짐 (위 마스킹에서 빠짐)
 
-  // 7. LRU에 추가 (재귀 swap_out이 이걸 victim으로 안 고르도록 마지막에)
+  // 7. LRU에 추가
   lru_add(pt, va, (uint64)mem);
 
   // 8. TLB flush

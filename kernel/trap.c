@@ -19,6 +19,9 @@ void kernelvec();
 
 extern int devintr();
 
+// forward declaration
+void prepare_return(void);
+
 // project 3: mmap_area 배열 참조
 extern struct mmap_area mmap_areas[MAXMMAP];
 
@@ -71,21 +74,18 @@ usertrap(void)
     intr_on();
 
     syscall();
-    // project 3: 페이지 폴트 핸들러
-    // AI was used to implement the page fault handler for lazy mmap regions.
-    // It validates the fault address against mmap_area, allocates a single page,
-    // loads file content if file-backed, and installs the PTE with proper permissions.
   }
   else if (r_scause() == 12 || r_scause() == 13 || r_scause() == 15)
   {
+    // 12 = instruction page fault
     // 13 = load page fault (read)
     // 15 = store page fault (write)
+    // AI was used (Claude) to integrate PA4 swap-in handler with PA3 mmap handler
     uint64 fault_addr = r_stval();
     int is_write = (r_scause() == 15);
     int handled = 0;
 
     // PA4: swap된 페이지면 swap_in 먼저 시도
-    // AI was used (Claude) to integrate swap-in handler
     if (fault_addr < MAXVA)
     {
       pte_t *pte_pa4 = walk(p->pagetable, fault_addr, 0);
@@ -97,8 +97,7 @@ usertrap(void)
         }
         else
         {
-          printf("usertrap(): swap_in failed, pid=%d\n", p->pid);
-          p->killed = 1;
+          setkilled(p);
           handled = 1;
         }
       }
@@ -151,15 +150,14 @@ usertrap(void)
 
       // PA3 lazy sbrk fallback (가드: 유효 VA 범위 안)
       if (!handled && fault_addr < p->sz &&
-        vmfault(p->pagetable, fault_addr, is_write ? 0 : 1) != 0)
+          vmfault(p->pagetable, fault_addr, is_write ? 0 : 1) != 0)
       {
         handled = 1;
       }
 
       if (!handled)
       {
-        printf("usertrap(): page fault not handled, pid=%d\n", p->pid);
-        p->killed = 1;
+        setkilled(p);
       }
     }
   }
@@ -245,7 +243,7 @@ void kerneltrap()
   uint64 sstatus = r_sstatus();
   uint64 scause = r_scause();
 
-  struct proc *p = myproc(); // 여기다도 myproc 추가
+  struct proc *p = myproc();
 
   if ((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
@@ -259,16 +257,16 @@ void kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt. -> if the process has used all its timeslice
+  // give up the CPU if this is a timer interrupt.
   if (which_dev == 2)
   {
     if (p != 0 && p->state == RUNNING)
     {
       if (p->timeslice <= 0)
       {
-        p->timeslice = 5;    // 타임슬라이스 재설정
-        update_vdeadline(p); // EEVDF 마감 기한 갱신
-        yield();             // CPU 양보
+        p->timeslice = 5;
+        update_vdeadline(p);
+        yield();
       }
     }
   }
@@ -279,36 +277,6 @@ void kerneltrap()
   w_sstatus(sstatus);
 }
 
-// void
-// clockintr()
-// {
-//   if(cpuid() == 0){
-//     acquire(&tickslock);
-//     ticks++;
-
-//     // update EEVDF parameters per tick
-//     struct proc *p = myproc(); // process that currently using CPU
-
-//     p->runtime += 1000 ;
-//     update_vruntime(p) ;
-
-//     p->timeslice -= 1 ;
-//     if(p->timeslice <= 0) {
-//         update_vdeadline(p);
-//         p->timeslice = 5;
-//     }
-
-//     p->last_update_time = r_time() ;
-
-//     wakeup(&ticks);
-//     release(&tickslock);
-//   }
-
-//   // ask for the next timer interrupt. this also clears
-//   // the interrupt request. 1000000 is about a tenth
-//   // of a second.
-//   w_stimecmp(r_time() + 100000);
-// }
 void clockintr()
 {
   if (cpuid() == 0)
@@ -319,15 +287,12 @@ void clockintr()
     release(&tickslock);
   }
   // EEVDF: p->lock 없이 atomic하게 카운터만 갱신
-  // (정확한 EEVDF 동기화는 yield/sched 시점에서 처리)
   struct proc *p = myproc();
   if (p != 0 && p->state == RUNNING)
   {
     p->runtime++;
     p->last_update_time = r_time();
     p->timeslice--;
-    // update_vruntime은 락 없이 호출하면 race 위험이지만,
-    // 단일 CPU 환경(qemu xv6)에선 안전. 필요시 multi-CPU 대응
     update_vruntime(p);
   }
 
@@ -347,7 +312,6 @@ int devintr()
   {
     // this is a supervisor external interrupt, via PLIC.
 
-    // irq indicates which device interrupted.
     int irq = plic_claim();
 
     if (irq == UART0_IRQ)
@@ -363,9 +327,6 @@ int devintr()
       printf("unexpected interrupt irq=%d\n", irq);
     }
 
-    // the PLIC allows each device to raise at most one
-    // interrupt at a time; tell the PLIC the device is
-    // now allowed to interrupt again.
     if (irq)
       plic_complete(irq);
 
