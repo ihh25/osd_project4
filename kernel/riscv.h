@@ -347,6 +347,12 @@ sfence_vma()
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 
+struct page {
+    struct page *next, *prev;
+    pagetable_t  pagetable;
+    uint64       vaddr;
+};
+
 #endif // __ASSEMBLER__
 
 #define PGSIZE 4096 // bytes per page
@@ -360,11 +366,16 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
+#define PTE_A (1L << 6) // accessed (set by hardware on access)
+#define PTE_D (1L << 7) // dirty (set by hardware on write)
+#define PTE_S (1L << 8)
 
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)
+#define SLOT2PTE(slot) PA2PTE((uint64)(slot) << 12)
+#define PTE2SLOT(pte)  ((uint)(PTE2PA(pte) >> 12))
 
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
 

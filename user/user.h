@@ -36,6 +36,8 @@ int waitpid(int);
 uint64 mmap(uint64, int, int, int, int, int);
 int munmap(uint64);
 int freemem(void);
+//project 4에서 추가
+int swapstat(int *nr_sectors_read, int *nr_sectors_write);
 
 
 // ulib.c

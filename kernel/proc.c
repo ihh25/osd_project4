@@ -174,22 +174,31 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  // PA4: kalloc이 swap I/O로 sleep 가능하므로 락 일시 해제.
+  // p->state = USED 상태라 다른 allocproc이 이 슬롯을 가져가지 않음.
+  // AI was used (Claude) to release/reacquire p->lock around kalloc
+  release(&p->lock);
+
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0)
   {
+    acquire(&p->lock);
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  // An empty user page table.
+  p->pagetable = proc_pagetable(p);
+  if (p->pagetable == 0)
+  {
+    acquire(&p->lock);
     freeproc(p);
     release(&p->lock);
     return 0;
   }
 
-  // An empty user page table.
-  p->pagetable = proc_pagetable(p);
-  if (p->pagetable == 0)
-  {
-    freeproc(p);
-    release(&p->lock);
-    return 0;
-  }
+  // PA4: 락 재취득
+  acquire(&p->lock);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -202,9 +211,7 @@ found:
   p->vdeadline = 0;
   p->timeslice = 5;
   p->is_eligible = 1;
-
   p->last_update_time = r_time();
-
   return p;
 }
 
@@ -227,6 +234,21 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  // PA4: 이 프로세스가 소유한 mmap_area 슬롯 정리
+  // AI was used (Claude) to clean up mmap_areas on process exit
+  for (int i = 0; i < MAXMMAP; i++) {
+    if (mmap_areas[i].p == p) {
+      mmap_areas[i].f = 0;
+      mmap_areas[i].addr = 0;
+      mmap_areas[i].length = 0;
+      mmap_areas[i].offset = 0;
+      mmap_areas[i].prot = 0;
+      mmap_areas[i].flags = 0;
+      mmap_areas[i].p = 0;
+    }
+  }
+
   p->state = UNUSED;
 }
 
@@ -331,9 +353,15 @@ int kfork(void)
     return -1;
   }
 
+  // PA4: uvmcopy/mmap 복사 시 swap I/O가 sleep을 유발할 수 있으므로
+  // np->lock을 일시 해제. np는 아직 외부에 노출되지 않아 안전.
+  // AI was used (Claude) to release/reacquire np->lock around copy paths
+  release(&np->lock);
+
   // Copy user memory from parent to child.
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0)
   {
+    acquire(&np->lock);
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -415,8 +443,11 @@ int kfork(void)
       }
     }
   }
-  pid = np->pid;
 
+  // PA4: 락 재취득 (allocproc이 잡았던 락을 fork 본문에서 일시 해제했음)
+  acquire(&np->lock);
+
+  pid = np->pid;
   release(&np->lock);
 
   acquire(&wait_lock);
@@ -682,8 +713,9 @@ void sched(void)
 
   if (!holding(&p->lock))
     panic("sched p->lock");
-  if (mycpu()->noff != 1)
+  if (mycpu()->noff != 1){
     panic("sched locks");
+  }
   if (p->state == RUNNING)
     panic("sched RUNNING");
   if (intr_get())

@@ -125,9 +125,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
   pte_t *pte;
   uint64 pa;
 
-  if(va >= MAXVA)
-    return 0;
-
+  if(va >= MAXVA)  
+  return 0;
   pte = walk(pagetable, va, 0);
   if(pte == 0)
     return 0;
@@ -167,6 +166,10 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     if(*pte & PTE_V)
       panic("mappages: remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
+    // PA4: user 페이지면 LRU에 추가 (커널/디바이스 매핑 제외)
+    // AI was used (Claude) to integrate LRU hook
+    if((perm & PTE_U) && pa >= KERNBASE && pa < PHYSTOP)
+      lru_add(pagetable, a, pa);
     if(a == last)
       break;
     a += PGSIZE;
@@ -202,11 +205,24 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
-      continue;   
+      continue;
+
+    // PA4: swap된 페이지면 슬롯만 해제 (물리 프레임 없음)
+    // AI was used (Claude) to integrate swap-aware unmap
+    if(*pte & PTE_S){
+      uint slot = PTE2SLOT(*pte);
+      swap_free_slot(slot);
+      *pte = 0;
+      continue;
+    }
+
     if((*pte & PTE_V) == 0)  // has physical page been allocated?
       continue;
     if(do_free){
       uint64 pa = PTE2PA(*pte);
+      // PA4: LRU에서 제거 (user 페이지에만)
+      if(*pte & PTE_U)
+        lru_remove(pa);
       kfree((void*)pa);
     }
     *pte = 0;
@@ -305,9 +321,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      continue;   // page table entry hasn't been allocated
+      continue;
+
+    // PA4: 부모가 swap 상태면 자식도 swap_in해서 복사
+    // AI was used (Claude) to handle swapped pages in uvmcopy
+    if(!(*pte & PTE_V) && (*pte & PTE_S)){
+      // 부모를 먼저 swap_in
+      if(swap_in(old, i) < 0)
+        goto err;
+      // swap_in 후 pte 재조회
+      pte = walk(old, i, 0);
+      if(pte == 0 || !(*pte & PTE_V))
+        goto err;
+    }
+
     if((*pte & PTE_V) == 0)
-      continue;   // physical page hasn't been allocated
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)

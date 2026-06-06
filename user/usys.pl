@@ -54,3 +54,6 @@ entry("waitpid");
 entry("mmap");
 entry("munmap");
 entry("freemem");
+
+#project 4 system call
+entry("swapstat");

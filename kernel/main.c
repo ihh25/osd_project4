@@ -26,6 +26,8 @@ main()
     plicinithart();  // ask PLIC for device interrupts
     binit();         // buffer cache
     iinit();         // inode table
+    swapinit();      // PA4: swap subsystem
+    lruinit();       // PA4: LRU list of swappable pages
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     userinit();      // first user process
