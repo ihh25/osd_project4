@@ -91,48 +91,61 @@ lru_size(void)
 //   6. Increment lru.count.
 //   7. Release lru.lock.
 //
-// AI was used (Claude) to assist with this implementation
 void
 lru_add(pagetable_t pt, uint64 va, uint64 pa)
 {
-  struct page *pg = pa_to_page(pa);
-
+  // TODO: implement.
+  struct page* pg = pa_to_page(pa);
   acquire(&lru.lock);
 
-  // 1. 이미 리스트에 있으면 unlink (freshness 갱신을 위해 재삽입)
-  if(pg->pagetable != 0){
-    if(pg->next == pg){
-      // 유일한 원소였음
-      lru.head = 0;
-    } else {
+  if(pg->pagetable != 0){ // if the node is already on the list    
+
+    if (lru.count > 1) { // count가 1이면 넣었다 빼는게 의미가 없으니까 그냥 둠
+
+      if (lru.head == pg) { // head 가리키고 있으면 다음으로 넘겨줌
+        lru.head = pg->next;
+      }
+      // 일단 먼저 연결을 끊는다
       pg->prev->next = pg->next;
       pg->next->prev = pg->prev;
-      if(lru.head == pg)
-        lru.head = pg->next;
+
+      //그리고 다시 tail에 삽입한다
+      pg->prev = lru.head->prev ;
+      pg->next = lru.head ;
+      pg->prev->next = pg;
+      lru.head->prev = pg;
+
+      // AI used : Gemini
+      // It advised me that, in cases like fork(), it is better to insert new values ​​even if they were already in the list,
+      // because there can be instances where the physical address is the same but the virtual address and page table are different.
+      pg->pagetable = pt;
+      pg->vaddr = va;
     }
-    lru.count--;
   }
+  else{ // 만약 원래 없던 노드라면
 
-  // 2. 소유자 정보 기록
-  pg->pagetable = pt;
-  pg->vaddr     = va;
+    // 일단 값을 채운다
+    pg->pagetable = pt;
+    pg->vaddr = va;
 
-  // 3. 꼬리에 삽입 (circular doubly linked list)
-  if(lru.head == 0){
-    // 빈 리스트
-    pg->next = pg;
-    pg->prev = pg;
-    lru.head = pg;
-  } else {
-    struct page *tail = lru.head->prev;
-    pg->next = lru.head;
-    pg->prev = tail;
-    tail->next = pg;
-    lru.head->prev = pg;
+    // 그리고 리스트에 삽입한다
+    if(lru.head != 0){ // 일반적인 상황 : 노드가 한개라도 있음 -> head가 0이 아님
+      // tail에 삽입한다
+      pg->prev = lru.head->prev ;
+      pg->next = lru.head ;
+      pg->prev->next = pg;
+      lru.head->prev = pg;
+
+    }else{ // 안 일반적인 상황 : 노드가 한개도 없다.
+      pg->next = pg->prev = pg;
+      lru.head = pg ;
+    }
+
+    lru.count++ ;
   }
+    release(&lru.lock);
 
-  lru.count++;
-  release(&lru.lock);
+    return ;
 }
 
 //
@@ -154,39 +167,47 @@ lru_add(pagetable_t pt, uint64 va, uint64 pa)
 //   6. Decrement lru.count.
 //   7. Release lru.lock.
 //
-// AI was used (Claude) to assist with this implementation
 void
 lru_remove(uint64 pa)
 {
-  struct page *pg = pa_to_page(pa);
-
+  // TODO: implement.
+  struct page* pg = pa_to_page(pa);
   acquire(&lru.lock);
 
-  // 리스트에 없으면 그냥 종료 (swap_out된 페이지 등)
-  if(pg->pagetable == 0){
+  if(pg->pagetable == 0){ // 애초에 리스트에 없음
+    release(&lru.lock);
+    return ;
+  }
+  else{ // 그게 아니면
+
+    if(lru.count == 1){ // pg가 the only element였음
+      lru.head = 0;
+    }
+    else{
+      // AI used : Geminin
+      // Question : Should this unlink be performed even on a list with only one node?
+      // Answer : When there is only one node, there is no need to touch it at all because pg->prev = pg->next = pg. 
+      // It is better to put it inside the else conditional statement.
+      // pg를 circular list에서 unlink
+      pg->prev->next = pg->next;
+      pg->next->prev = pg->prev;  
+
+      if(lru.head == pg){ // pg가 head였으면
+        lru.head = pg->next ; // 한칸 옮겨
+      }
+    }
+
+    // 그리고 pg를 지워
+    pg->next = 0;
+    pg->prev = 0;
+    pg->pagetable = 0; 
+    pg->vaddr = 0;
+
+    lru.count-- ;
+
     release(&lru.lock);
     return;
   }
-
-  // unlink
-  if(pg->next == pg){
-    // 유일한 원소
-    lru.head = 0;
-  } else {
-    pg->prev->next = pg->next;
-    pg->next->prev = pg->prev;
-    if(lru.head == pg)
-      lru.head = pg->next;
-  }
-
-  // 노드 클리어 (pagetable == 0 → "리스트에 없음" 표식)
-  pg->next      = 0;
-  pg->prev      = 0;
-  pg->pagetable = 0;
-  pg->vaddr     = 0;
-
-  lru.count--;
-  release(&lru.lock);
 }
 
 //

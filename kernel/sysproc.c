@@ -162,7 +162,6 @@ sys_freemem(void)
   return freemem();
 }
 
-// AI was used (Claude) to assist with this implementation
 uint64
 sys_swapstat(void)
 {
